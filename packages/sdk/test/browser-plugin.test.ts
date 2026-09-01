@@ -33,12 +33,14 @@ const fixture = Effect.gen(function* () {
       project: false,
       content: JSON.stringify({
         plugins: ["-opencode.browser"],
+        permissions: [{ action: "browser", resource: "*", effect: "allow" }],
       }),
     },
     models: { fetch: false },
     fs: { filewatcher: false, fff: false },
   })
   const captured = Promise.withResolvers<Info>()
+  const permissions: Array<{ action: string; resources: readonly string[] }> = []
   yield* opencode.plugin({ ...plugin, id: "browser-test" })
   yield* opencode.plugin({
     id: "browser-test-observer",
@@ -49,6 +51,9 @@ const fixture = Effect.gen(function* () {
           const tool = draft.get("browser")
           if (tool && ctx.location.directory === location.directory) captured.resolve(tool)
         })
+        yield* ctx.permission.hook("evaluate", (event) =>
+          Effect.sync(() => permissions.push({ action: event.action, resources: event.resources })),
+        )
       }).pipe(Effect.orDie),
   })
   yield* opencode.plugin.list({ location })
@@ -80,6 +85,7 @@ const fixture = Effect.gen(function* () {
     opencode,
     location,
     rpc,
+    permissions,
     execute,
     next,
     attach: Effect.fn(function* (connectionID: string) {
@@ -242,6 +248,7 @@ test(
         expect(result.metadata).toEqual({
           toolCalls: [{ tool: "browser", status: "completed", input: { type: "screenshot" } }],
         })
+        expect(host.permissions).toEqual([{ action: "browser", resources: [state.url] }])
 
         yield* Fiber.interrupt(attached.lifetime)
         const disconnected = yield* execute('return await tools.browser({ type: "open" })')
@@ -257,7 +264,7 @@ test(
 )
 
 test(
-  "commands use published state, and RPC results render text and screenshot bytes",
+  "commands use published state and permissions, and RPC results render text and screenshot bytes",
   () =>
     Effect.gen(function* () {
       const host = yield* fixture
@@ -273,6 +280,7 @@ test(
         options,
       )
       expect((yield* Fiber.join(open.pending)).metadata).toEqual({ url: state.url })
+      expect(host.permissions).toEqual([])
       yield* host.rpc.state({ ...attached.input, state }, options)
 
       const navigate = yield* host.command({ type: "navigate", url: "https://example.org/next" })
@@ -323,6 +331,11 @@ test(
         ],
         metadata: { url: updated.url },
       })
+      expect(host.permissions).toEqual([
+        { action: "browser", resources: [updated.url] },
+        { action: "browser", resources: [updated.url] },
+        { action: "browser", resources: [updated.url] },
+      ])
       const failure = yield* host.command({ type: "snapshot" })
       yield* host.rpc.result(
         { ...attached.input, requestID: failure.requestID, outcome: { type: "failure", message: "Stale document" } },
