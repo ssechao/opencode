@@ -574,8 +574,7 @@
     }
 
     .tab-fileicon-color,
-    .tab-fileicon-mono,
-    [data-slot="icon-svg"] {
+    .tab-fileicon-mono {
       margin-inline-start: -2px;
     }
 
