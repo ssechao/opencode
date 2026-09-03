@@ -33,6 +33,9 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
+  readonly responseContinuation?: {
+    readonly previousResponseId?: string
+  }
 }
 
 export type Prepared = {
@@ -89,6 +92,16 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         providerOptions: input.provider.options,
       })
   const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  const responsesContinuation = input.responseContinuation !== undefined
+  delete options.responsesContinuation
+  if (responsesContinuation) {
+    if (options.conversation !== undefined) {
+      return yield* Effect.fail(new Error("Responses continuation cannot be combined with a configured conversation"))
+    }
+    options.store = true
+    options.previousResponseId = input.responseContinuation?.previousResponseId
+    options.instructions = system.join("\n")
+  }
   if (
     input.model.api.npm === "@ai-sdk/azure" &&
     (input.provider.options.useCompletionUrls || input.model.options.useCompletionUrls || options.useCompletionUrls)
@@ -99,7 +112,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   if (isOpenaiOauth) options.instructions = system.join("\n")
 
   const messages =
-    isOpenaiOauth || input.isWorkflow
+    isOpenaiOauth || input.isWorkflow || responsesContinuation
       ? input.messages
       : [
           ...system.map(
@@ -183,7 +196,13 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     messages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
     params,
-    messageTransformOptions: options,
+    // The first stored request may replay messages produced earlier with
+    // store:false. Strip their non-addressable item IDs while bootstrapping the
+    // new chain; later deltas are already linked by previous_response_id.
+    messageTransformOptions:
+      responsesContinuation && input.responseContinuation?.previousResponseId === undefined
+        ? { ...options, store: false }
+        : options,
     headers: {
       ...(input.model.providerID.startsWith("opencode")
         ? {
@@ -191,14 +210,12 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             "x-opencode-session": input.sessionID,
             "x-opencode-request": input.user.id,
             "x-opencode-client": input.flags.client,
+            ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
             "User-Agent": USER_AGENT,
           }
         : {
-            "x-session-affinity": input.sessionID,
-            "X-Session-Id": input.sessionID,
             "User-Agent": USER_AGENT,
           }),
-      ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
       ...input.model.headers,
       ...headers,
     },
