@@ -1284,7 +1284,10 @@ const layer = Layer.effect(
               tools,
               model,
               responseContinuation: continuation.enabled
-                ? { previousResponseId: continuation.previousResponseId }
+                ? {
+                    previousResponseId: continuation.previousResponseId,
+                    recoveryHistory: continuation.recoveryHistory,
+                  }
                 : undefined,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })

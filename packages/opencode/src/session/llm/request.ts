@@ -5,7 +5,6 @@ import type { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
 import type { Agent } from "@/agent/agent"
-import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
@@ -35,6 +34,7 @@ type PrepareInput = {
   readonly isWorkflow: boolean
   readonly responseContinuation?: {
     readonly previousResponseId?: string
+    readonly recoveryHistory?: SessionV1.WithParts[]
   }
 }
 

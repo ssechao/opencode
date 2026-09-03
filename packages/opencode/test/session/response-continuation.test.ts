@@ -6,7 +6,7 @@ import { ResponseContinuation } from "@/session/llm/response-continuation"
 import { LLMRequestPrep } from "@/session/llm/request"
 import { ProviderTransform } from "@/provider/transform"
 import { createOpenAI } from "@ai-sdk/openai"
-import { streamText, type ModelMessage } from "ai"
+import { APICallError, streamText, type ModelMessage } from "ai"
 
 const sessionID = "ses_continuation" as any
 
@@ -61,6 +61,7 @@ function assistant(input: {
   providerID?: string
   modelID?: string
   tool?: boolean
+  finish?: "stop" | "tool-calls" | "unknown"
 }): SessionV1.WithParts {
   const providerID = input.providerID ?? "weytop-wrapper"
   const modelID = input.modelID ?? "claude-opus-5"
@@ -78,7 +79,7 @@ function assistant(input: {
       providerID,
       modelID,
       time: { created: input.created, completed: input.created + 1 },
-      finish: input.tool ? "tool-calls" : "stop",
+      finish: input.finish ?? (input.tool ? "tool-calls" : "stop"),
     },
     parts: [
       ...(input.tool
@@ -114,7 +115,7 @@ function assistant(input: {
         messageID: input.id,
         sessionID,
         type: "step-finish" as const,
-        reason: input.tool ? "tool-calls" : "stop",
+        reason: input.finish ?? (input.tool ? "tool-calls" : "stop"),
         cost: 0,
         tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
         providerMetadata: input.responseId ? { openai: { responseId: input.responseId } } : undefined,
@@ -344,7 +345,53 @@ describe("Responses continuation", () => {
 
     expect(result.enabled).toBe(true)
     expect(result.previousResponseId).toBe("resp_1")
+    expect(result.recoveryHistory).toBe(messages)
     expect(result.messages).toEqual([{ role: "user", content: [{ type: "text", text: "second" }] }])
+  })
+
+  test("never reuses a response id from an unknown finish", async () => {
+    const messages = [
+      user("msg_user_1", "first", 1),
+      assistant({
+        id: "msg_assistant_1",
+        parentID: "msg_user_1",
+        created: 2,
+        responseId: "resp_missing",
+        finish: "unknown",
+      }),
+      user("msg_user_2", "retry", 3),
+    ]
+    const result = await Effect.runPromise(ResponseContinuation.prepare({ messages, model: model() }))
+
+    expect(result.previousResponseId).toBeUndefined()
+    expect(result.recoveryHistory).toBeUndefined()
+    expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"])
+  })
+
+  test("recognizes only a structured missing stored Response error", () => {
+    const error = new APICallError({
+      message: "No response found",
+      url: "http://wrapper.test/v1/responses",
+      requestBodyValues: {},
+      statusCode: 404,
+      responseHeaders: {},
+      responseBody: JSON.stringify({ error: { code: "resource_not_found" } }),
+      isRetryable: false,
+    })
+    expect(ResponseContinuation.missingStoredResponse(error)).toBe(true)
+    expect(
+      ResponseContinuation.missingStoredResponse(
+        new APICallError({
+          message: "other 404",
+          url: "http://wrapper.test/v1/responses",
+          requestBodyValues: {},
+          statusCode: 404,
+          responseHeaders: {},
+          responseBody: JSON.stringify({ error: { code: "other" } }),
+          isRetryable: false,
+        }),
+      ),
+    ).toBe(false)
   })
 
   test("continues a tool response with only its locally executed tool output", async () => {

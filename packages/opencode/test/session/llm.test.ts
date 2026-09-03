@@ -17,7 +17,7 @@ import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { testEffect } from "../lib/effect"
 import type { Agent } from "../../src/agent/agent"
 import { MessageV2 } from "../../src/session/message-v2"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
@@ -1372,6 +1372,169 @@ describe("session.llm.stream", () => {
 
         const maxTokens = body.max_output_tokens as number | undefined
         expect(maxTokens).toBe(undefined) // match codex cli behavior
+      }),
+    { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
+  )
+
+  it.instance(
+    "rebuilds one stored Responses chain after a missing previous response",
+    () =>
+      Effect.gen(function* () {
+        const model = loadFixture("openai", "gpt-5.2").model
+        const missing = waitRequest(
+          "/responses",
+          new Response(JSON.stringify({ error: { code: "resource_not_found", message: "missing" } }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          }),
+        )
+        const recovered = waitRequest(
+          "/responses",
+          createEventResponse(
+            [
+              {
+                type: "response.created",
+                response: {
+                  id: "resp-recovered",
+                  created_at: Math.floor(Date.now() / 1000),
+                  model: model.id,
+                  service_tier: null,
+                },
+              },
+              {
+                type: "response.output_item.added",
+                output_index: 0,
+                item: {
+                  type: "message",
+                  id: "item-recovered",
+                  status: "in_progress",
+                  role: "assistant",
+                  content: [],
+                },
+              },
+              {
+                type: "response.output_text.delta",
+                item_id: "item-recovered",
+                output_index: 0,
+                content_index: 0,
+                delta: "recovered",
+                logprobs: null,
+              },
+              {
+                type: "response.completed",
+                response: {
+                  incomplete_details: null,
+                  usage: {
+                    input_tokens: 3,
+                    input_tokens_details: null,
+                    output_tokens: 1,
+                    output_tokens_details: null,
+                  },
+                  service_tier: null,
+                },
+              },
+            ],
+            true,
+          ),
+        )
+
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
+        const sessionID = SessionID.make("session-response-recovery")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-response-recovery"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.openai, modelID: resolved.id },
+        } satisfies SessionV1.User
+        const recoveryHistory = [
+          {
+            info: {
+              id: MessageID.make("msg_user-old"),
+              sessionID,
+              role: "user" as const,
+              time: { created: 1 },
+              agent: agent.name,
+              model: { providerID: ProviderV2.ID.openai, modelID: resolved.id },
+            },
+            parts: [
+              {
+                id: PartID.make("prt_user-old"),
+                messageID: MessageID.make("msg_user-old"),
+                sessionID,
+                type: "text" as const,
+                text: "old question",
+              },
+            ],
+          },
+          {
+            info: {
+              id: MessageID.make("msg_assistant-old"),
+              parentID: MessageID.make("msg_user-old"),
+              sessionID,
+              role: "assistant" as const,
+              mode: "test",
+              agent: agent.name,
+              path: { cwd: "/tmp", root: "/tmp" },
+              cost: 0,
+              tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+              providerID: ProviderV2.ID.openai,
+              modelID: resolved.id,
+              time: { created: 2, completed: 3 },
+              finish: "stop" as const,
+            },
+            parts: [
+              {
+                id: PartID.make("prt_assistant-old"),
+                messageID: MessageID.make("msg_assistant-old"),
+                sessionID,
+                type: "text" as const,
+                text: "old answer",
+              },
+            ],
+          },
+          {
+            info: user,
+            parts: [
+              {
+                id: PartID.make("prt_user-new"),
+                messageID: user.id,
+                sessionID,
+                type: "text" as const,
+                text: "new question",
+              },
+            ],
+          },
+        ] as SessionV1.WithParts[]
+
+        yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "new question" }],
+          tools: {},
+          responseContinuation: {
+            previousResponseId: "resp-missing",
+            recoveryHistory,
+          },
+        })
+
+        const first = yield* Effect.promise(() => missing)
+        const second = yield* Effect.promise(() => recovered)
+        expect(first.body.previous_response_id).toBe("resp-missing")
+        expect(first.body.input).toHaveLength(1)
+        expect(second.body.previous_response_id).toBeUndefined()
+        expect(second.body.store).toBe(true)
+        expect(second.body.input).toHaveLength(3)
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

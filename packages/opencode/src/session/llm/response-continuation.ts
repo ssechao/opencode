@@ -1,6 +1,6 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Effect } from "effect"
-import type { ModelMessage } from "ai"
+import { APICallError, type ModelMessage } from "ai"
 import type { Provider } from "@/provider/provider"
 import { MessageV2 } from "../message-v2"
 
@@ -9,11 +9,22 @@ const RESPONSE_ID = /^[A-Za-z0-9_-]{1,256}$/
 export type Prepared = {
   readonly enabled: boolean
   readonly previousResponseId?: string
+  readonly recoveryHistory?: SessionV1.WithParts[]
   readonly messages: ModelMessage[]
 }
 
 export function enabled(model: Provider.Model) {
   return model.api.npm === "@ai-sdk/openai" && model.options.responsesContinuation === true
+}
+
+export function missingStoredResponse(error: unknown) {
+  if (!APICallError.isInstance(error) || error.statusCode !== 404 || !error.responseBody) return false
+  try {
+    const body = JSON.parse(error.responseBody)
+    return body?.error?.code === "resource_not_found"
+  } catch {
+    return false
+  }
 }
 
 function after(left: SessionV1.Info, right: SessionV1.Info) {
@@ -24,6 +35,7 @@ function after(left: SessionV1.Info, right: SessionV1.Info) {
 function responseID(message: SessionV1.WithParts): string | undefined {
   if (message.info.role !== "assistant") return undefined
   const finish = message.parts.findLast((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+  if (finish?.reason !== "stop" && finish?.reason !== "tool-calls") return undefined
   const openai = finish?.providerMetadata?.openai
   if (!openai || typeof openai !== "object" || Array.isArray(openai)) return undefined
   const value = openai.responseId
@@ -67,7 +79,7 @@ export const prepare = Effect.fn("ResponseContinuation.prepare")(function* (inpu
     anchor.info.providerID === input.model.providerID &&
     anchor.info.modelID === input.model.id &&
     anchor.info.time.completed !== undefined &&
-    anchor.info.finish !== undefined &&
+    (anchor.info.finish === "stop" || anchor.info.finish === "tool-calls") &&
     anchor.info.error === undefined &&
     (!compacted || after(anchor.info, compacted.info))
   const previousResponseId = canContinue && anchor ? responseID(anchor) : undefined
@@ -86,10 +98,9 @@ export const prepare = Effect.fn("ResponseContinuation.prepare")(function* (inpu
   const tail = input.messages.filter((message) => after(message.info, anchor.info))
   const tailMessages = yield* MessageV2.toModelMessagesEffect(tail, input.model)
   const delta = [...anchorMessages.filter((message) => message.role === "tool"), ...tailMessages]
-  // OpenCode deliberately retries an "unknown" finish. A Responses request
-  // cannot contain zero messages, so an output-only anchor has no standard
-  // delta to continue with. Rebuild a fresh stored chain for this exceptional
-  // recovery path instead of fabricating a user message or failing locally.
+  // A Responses request cannot contain zero messages. An output-only anchor
+  // has no standard delta to continue with, so rebuild a fresh stored chain
+  // instead of fabricating a user message or failing locally.
   if (delta.length === 0) {
     return {
       enabled: true,
@@ -99,6 +110,9 @@ export const prepare = Effect.fn("ResponseContinuation.prepare")(function* (inpu
   return {
     enabled: true,
     previousResponseId,
+    // Keep references to the local history; materialize the full ModelMessage
+    // copy only if the server actually reports a missing stored Response.
+    recoveryHistory: input.messages,
     messages: delta,
   } satisfies Prepared
 })

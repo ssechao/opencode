@@ -14,7 +14,7 @@ import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
 import type { Agent } from "@/agent/agent"
-import type { MessageV2 } from "./message-v2"
+import { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { ResponseContinuation } from "./llm/response-continuation"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -47,6 +48,7 @@ export type StreamInput = {
   toolChoice?: "auto" | "required" | "none"
   responseContinuation?: {
     readonly previousResponseId?: string
+    readonly recoveryHistory?: SessionV1.WithParts[]
   }
 }
 
@@ -366,18 +368,57 @@ const live: Layer.Layer<
               (ctrl) => Effect.sync(() => ctrl.abort()),
             )
 
-            const result = yield* run({ ...input, abort: ctrl.signal })
+            const request = { ...input, abort: ctrl.signal }
+            const result = yield* run(request)
 
             if (result.type === "native") return result.stream
 
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
-            const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
-            ).pipe(
-              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-              Stream.flatMap((events) => Stream.fromIterable(events)),
+            const convert = (value: { result: typeof result.result }) => {
+              const state = LLMAISDK.adapterState()
+              return Stream.fromAsyncIterable(value.result.fullStream, (e) =>
+                e instanceof Error ? e : new Error(String(e)),
+              ).pipe(
+                Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+                Stream.flatMap((events) => Stream.fromIterable(events)),
+              )
+            }
+            const recoveryHistory = input.responseContinuation?.recoveryHistory
+            if (!input.responseContinuation?.previousResponseId || !recoveryHistory) return convert(result)
+
+            // A missing stored response is safe to recover only before the
+            // provider has emitted anything. Retry once with the complete
+            // local history and no previous_response_id; all other errors and
+            // partial streams remain fail-loud.
+            let emitted = false
+            return convert(result).pipe(
+              Stream.tap(() =>
+                Effect.sync(() => {
+                  emitted = true
+                }),
+              ),
+              Stream.catchIf(
+                (error) => !emitted && ResponseContinuation.missingStoredResponse(error),
+                () =>
+                  Stream.unwrap(
+                    Effect.gen(function* () {
+                      yield* Effect.logWarning("stored Response missing; rebuilding chain once", {
+                        providerID: input.model.providerID,
+                        modelID: input.model.id,
+                        "session.id": input.sessionID,
+                      })
+                      const recoveryMessages = yield* MessageV2.toModelMessagesEffect(recoveryHistory, input.model)
+                      const recovered = yield* run({
+                        ...request,
+                        messages: recoveryMessages,
+                        responseContinuation: {},
+                      })
+                      if (recovered.type === "native") return recovered.stream
+                      return convert(recovered)
+                    }),
+                  ),
+              ),
             )
           }),
         ),
