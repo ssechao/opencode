@@ -3,6 +3,7 @@ export * as SessionV1 from "./session"
 import { Effect, Schema, Types } from "effect"
 import { define, inventory } from "../event"
 import { FileDiff } from "../file-diff"
+import { ProviderMetadata } from "../llm"
 import { Project } from "../project"
 import { Provider } from "../provider"
 import { Model } from "../model"
@@ -253,8 +254,11 @@ export const StepFinishPart = Schema.Struct({
       write: Schema.Finite,
     }),
   }),
+  providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "StepFinishPart" })
-export type StepFinishPart = Types.DeepMutable<Schema.Schema.Type<typeof StepFinishPart>>
+export type StepFinishPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof StepFinishPart>>, "providerMetadata"> & {
+  providerMetadata?: ProviderMetadata
+}
 
 export const ToolStatePending = Schema.Struct({
   status: Schema.Literal("pending"),

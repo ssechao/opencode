@@ -226,12 +226,90 @@ const fragmentFailureLLM = Layer.succeed(
 const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
+const responseMetadataLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "text-1" }),
+        LLMEvent.textDelta({ id: "text-1", text: "done" }),
+        LLMEvent.textEnd({ id: "text-1" }),
+        LLMEvent.stepFinish({
+          index: 0,
+          reason: "stop",
+          providerMetadata: { openai: { responseId: "resp_persisted" } },
+        }),
+        LLMEvent.finish({ reason: "stop" }),
+      ),
+  }),
+)
+const responseMetadataEnv = LayerNode.compile(root, [...replacements, [LLM.node, responseMetadataLLM]])
+const itResponseMetadata = testEffect(responseMetadataEnv)
+
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
   const provider = yield* Provider.Service
   return { processors, session, provider }
 })
+
+itResponseMetadata.live("session.processor persists response provider metadata on step finish", () =>
+  provideTmpdirInstance((dir) =>
+    Effect.gen(function* () {
+      const { processors, session } = yield* boot()
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "continue")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      const mdl = {
+        id: ref.modelID,
+        providerID: ref.providerID,
+        api: { id: ref.modelID, url: "http://localhost", npm: "@ai-sdk/openai-compatible" },
+        name: "Test Model",
+        release_date: "2026-01-01",
+        family: "test",
+        status: "active",
+        options: {},
+        headers: {},
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: 100_000, output: 10_000 },
+        capabilities: {
+          temperature: false,
+          reasoning: false,
+          attachment: false,
+          toolcall: true,
+          input: { text: true, audio: false, image: false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        variants: {},
+      } as unknown as Provider.Model
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+      yield* handle.process({
+        user: {
+          id: parent.id,
+          sessionID: chat.id,
+          role: "user",
+          time: parent.time,
+          agent: parent.agent,
+          model: { providerID: ref.providerID, modelID: ref.modelID },
+        } satisfies SessionV1.User,
+        sessionID: chat.id,
+        model: mdl,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user", content: "continue" }],
+        tools: {},
+      })
+
+      const finish = (yield* MessageV2.parts(msg.id)).find(
+        (part): part is SessionV1.StepFinishPart => part.type === "step-finish",
+      )
+      expect(finish?.providerMetadata).toEqual({ openai: { responseId: "resp_persisted" } })
+    }),
+  ),
+)
 
 // ---------------------------------------------------------------------------
 // Tests
