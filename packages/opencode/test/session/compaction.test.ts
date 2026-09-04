@@ -405,6 +405,25 @@ describe("session.compaction.isOverflow", () => {
   )
 
   it.live(
+    "honors a configured compaction reserve without an input limit",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: 1_000_000, output: 128_000 })
+          const tokens = { input: 875_000, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }
+
+          expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { reserved: 128_000 },
+        },
+      },
+    ),
+  )
+
+  it.live(
     "includes cache.read in token count",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
