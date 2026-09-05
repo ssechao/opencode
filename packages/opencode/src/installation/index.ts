@@ -32,6 +32,17 @@ export function getReleaseType(current: string, latest: string): ReleaseType {
   return "patch"
 }
 
+export function isUpdateAvailable(current: string, latest: string) {
+  const currentVersion = semver.parse(current)
+  const latestVersion = semver.parse(latest)
+  if (!currentVersion || !latestVersion) return current !== latest
+  const comparableCurrent =
+    currentVersion.prerelease[0] === "weytop"
+      ? `${currentVersion.major}.${currentVersion.minor}.${currentVersion.patch}`
+      : currentVersion
+  return semver.gt(latestVersion, comparableCurrent)
+}
+
 export const Info = Schema.Struct({
   version: Schema.String,
   latest: Schema.String,

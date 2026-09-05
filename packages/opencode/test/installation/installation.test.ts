@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import { makeGlobalNode } from "@opencode-ai/core/effect/app-node"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
@@ -67,6 +67,20 @@ function testLayer(
 }
 
 describe("installation", () => {
+  describe("isUpdateAvailable", () => {
+    test("treats a Weytop build as current with its matching upstream release", () => {
+      expect(Installation.isUpdateAvailable("1.18.29-weytop.202609051351", "1.18.29")).toBe(false)
+    })
+
+    test("still detects a newer upstream release for a Weytop build", () => {
+      expect(Installation.isUpdateAvailable("1.18.29-weytop.202609051351", "1.18.30")).toBe(true)
+    })
+
+    test("keeps normal prerelease upgrade semantics", () => {
+      expect(Installation.isUpdateAvailable("1.18.29-beta.1", "1.18.29")).toBe(true)
+    })
+  })
+
   describe("latest", () => {
     testEffect(testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))).effect(
       "reads release version from GitHub releases",
