@@ -25,6 +25,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { ProviderError } from "@/provider/error"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -72,6 +73,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  actionableOutput: boolean
 }
 
 type StreamEvent = LLMEvent
@@ -111,6 +113,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        actionableOutput: false,
       }
       let aborted = false
 
@@ -329,6 +332,7 @@ const layer = Layer.effect(
           }
 
           case "tool-call": {
+            ctx.actionableOutput = true
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
             }
@@ -513,6 +517,7 @@ const layer = Layer.effect(
 
           case "text-delta":
             if (!ctx.currentText) return
+            if (value.text.trim()) ctx.actionableOutput = true
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
@@ -645,6 +650,7 @@ const layer = Layer.effect(
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
+        ctx.actionableOutput = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
@@ -691,6 +697,11 @@ const layer = Layer.effect(
             Effect.ensuring(cleanup()),
           )
 
+          if (ctx.assistantMessage.finish === "unknown" && !ctx.actionableOutput) {
+            yield* halt(new ProviderError.ResponseStreamError("Provider ended without answer text or a tool call"))
+            yield* session.updateMessage(ctx.assistantMessage)
+            return "stop"
+          }
           if (ctx.needsCompaction) return "compact"
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
           return "continue"

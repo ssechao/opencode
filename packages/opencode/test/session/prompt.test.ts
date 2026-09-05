@@ -850,7 +850,7 @@ it.instance("loop continues when finish is tool-calls", () =>
   }),
 )
 
-it.instance("loop continues when finish is unknown", () =>
+it.instance("loop continues when an unknown finish contains answer text", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
     const prompt = yield* SessionPrompt.Service
@@ -865,7 +865,7 @@ it.instance("loop continues when finish is unknown", () =>
       noReply: true,
       parts: [{ type: "text", text: "hello" }],
     })
-    yield* llm.push(reply())
+    yield* llm.push(reply().text("partial"))
     yield* llm.text("second")
 
     const result = yield* prompt.loop({ sessionID: session.id })
@@ -874,6 +874,35 @@ it.instance("loop continues when finish is unknown", () =>
     if (result.info.role === "assistant") {
       expect(result.parts.some((part) => part.type === "text" && part.text === "second")).toBe(true)
       expect(result.info.finish).toBe("stop")
+    }
+  }),
+)
+
+it.instance("loop stops when an unknown finish has no answer text or tool call", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().reason("planning only"))
+    yield* llm.text("must not run")
+
+    const result = yield* prompt.loop({ sessionID: session.id })
+    expect(yield* llm.calls).toBe(1)
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant") {
+      expect(result.info.finish).toBe("unknown")
+      expect(result.info.error).toBeDefined()
+      expect(result.parts.some((part) => part.type === "text" && part.text === "must not run")).toBe(false)
     }
   }),
 )
